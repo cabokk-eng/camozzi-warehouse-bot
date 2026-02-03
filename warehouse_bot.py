@@ -43,20 +43,20 @@ async def ask_position(message: types.Message):
 async def handle_position_input(message: types.Message):
     uid = message.from_user.id
     role = users.get(uid, {}).get('role')
-    if role not in ['picker', 'admin']:
-        return
-    position = message.text.strip()
-    if not position:
-        return
-    pending_requests.append({'picker_id': uid, 'position': position})
-    await message.answer(f"✅ Запрос на пополнение `{position}` добавлен в очередь.", parse_mode="Markdown")
+    if role in ['picker', 'admin']:
+        position = message.text.strip()
+        if position:
+            pending_requests.append({'picker_id': uid, 'position': position})
+            await message.answer(f"✅ Запрос на пополнение `{position}` добавлен в очередь.", parse_mode="Markdown")
+    else:
+        await message.answer("Вы не можете отправлять запросы.")
 
 @dp.message_handler(lambda m: m.text == "🛠 Активные запросы")
 async def show_requests(message: types.Message):
     uid = message.from_user.id
     role = users.get(uid, {}).get('role')
     if role not in ['stocker', 'admin']:
-        # Становимся кладовщиком при первом нажатии
+        # Делаем пользователя кладовщиком при первом нажатии
         users[uid] = {'role': 'stocker', 'username': get_username(message.from_user)}
         role = 'stocker'
 
@@ -69,9 +69,9 @@ async def show_requests(message: types.Message):
         picker_name = users.get(req['picker_id'], {}).get('username', 'комплектовщик')
         text += f"{i}. `{req['position']}` (от {picker_name})\n"
 
-    # Кнопки: по одной на каждый запрос
+    # Кнопки: 1, 2, 3...
     kb = InlineKeyboardMarkup(row_width=5)
-    buttons = [InlineKeyboardButton(str(i), callback_data=f"fulfill_{i}") for i in range(1, len(pending_requests) + 1)]
+    buttons = [InlineKeyboardButton(str(i), callback_data=f"fulfill_{i}") for i in range(1, min(len(pending_requests) + 1, 21))]
     kb.add(*buttons)
 
     await message.answer(text, parse_mode="Markdown", reply_markup=kb)
@@ -82,12 +82,9 @@ async def fulfill_request(callback: types.CallbackQuery):
     try:
         idx = int(callback.data.split("_")[1]) - 1
         if 0 <= idx < len(pending_requests):
-            req = pending_requests[idx]
+            req = pending_requests.pop(idx)
             position = req['position']
             picker_id = req['picker_id']
-
-            # Удаляем запрос из очереди
-            del pending_requests[idx]
 
             # Уведомляем комплектовщика
             try:
@@ -109,4 +106,3 @@ async def fulfill_request(callback: types.CallbackQuery):
 if __name__ == "__main__":
     print("Бот запущен...")
     executor.start_polling(dp, skip_updates=True)
-
