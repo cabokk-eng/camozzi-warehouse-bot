@@ -1,14 +1,13 @@
 import os
 import logging
 from aiogram import Bot, Dispatcher, executor, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-# === НАСТРОЙКИ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
 
 # Хранилище
-users = {}  # chat_id -> {'role': 'picker' / 'stocker', 'username': '@...'}
+users = {}  # chat_id -> {'role': 'picker'/'stocker', 'username': '@...'}
 pending_requests = []  # [{'picker_id': ..., 'position': str}, ...]
 
 logging.basicConfig(level=logging.INFO)
@@ -24,142 +23,101 @@ def get_username(user):
 async def cmd_start(message: types.Message):
     uid = message.from_user.id
     username = get_username(message.from_user)
-
     if uid == ADMIN_CHAT_ID:
         users[uid] = {'role': 'admin', 'username': username}
-        kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.add("📦 Отправить позицию", "🛠 Активные запросы")
+        kb = ReplyKeyboardMarkup(resize_keyboard=True).add(
+            "📦 Отправить позицию",
+            "🛠 Активные запросы"
+        )
         await message.answer("✅ Вы — админ (комплектовщик + кладовщик).", reply_markup=kb)
     else:
         users[uid] = {'role': 'picker', 'username': username}
-        kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.add("📦 Отправить позицию")
+        kb = ReplyKeyboardMarkup(resize_keyboard=True).add("📦 Отправить позицию")
         await message.answer("✅ Вы — комплектовщик.", reply_markup=kb)
 
-@dp.message_handler(commands=["кладовщик"])
-async def cmd_add_stocker(message: types.Message):
-    if message.from_user.id != ADMIN_CHAT_ID:
-        return
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.answer("Формат: /кладовщик @username")
-        return
-    target_username = parts[1]
-    for uid, data in users.items():
-        if data.get('username') == target_username:
-            users[uid]['role'] = 'stocker'
-            await message.answer(f"✅ {target_username} назначен кладовщиком.")
-            return
-    await message.answer(f"Пользователь {target_username} не найден. Он должен написать /start.")
+@dp.message_handler(lambda m: m.text == "📦 Отправить позицию")
+async def ask_position(message: types.Message):
+    await message.answer("Введите код позиции (например, `9540 1/2`):")
 
-@dp.message_handler(content_types=types.ContentTypes.TEXT)
-async def handle_text(message: types.Message):
+@dp.message_handler(lambda m: m.text not in ["📦 Отправить позицию", "🛠 Активные запросы"])
+async def handle_position_input(message: types.Message):
     uid = message.from_user.id
-    text = message.text.strip()
-
     if uid not in users:
         await message.answer("Напишите /start")
         return
-
     role = users[uid]['role']
-
-    # === Комплектовщик: отправка позиции ===
-    if role == 'picker' and text == "📦 Отправить позицию":
-        await message.answer("Введите код позиции (например, `9540 1/2`):")
+    if role != 'picker' and role != 'admin':
         return
 
-    if role == 'picker' and text != "📦 Отправить позицию":
-        # Сохраняем запрос как есть (сохраняем дроби!)
-        pending_requests.append({'picker_id': uid, 'position': text})
-        await message.answer(f"✅ Запрос на пополнение `{text}` добавлен в очередь.", parse_mode="Markdown")
+    position = message.text.strip()
+    if not position:
         return
 
-    # === Кладовщик или админ: просмотр запросов ===
-    if (role == 'stocker' or role == 'admin') and text == "🛠 Активные запросы":
-        if not pending_requests:
-            await message.answer("📭 Нет активных запросов.")
-            return
+    # Подтверждение
+    confirm_kb = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("✅ Да", callback_data=f"confirm_{uid}_{position}"),
+        InlineKeyboardButton("❌ Нет", callback_data="cancel")
+    )
+    await message.answer(f"Запросить пополнение для `{position}`?", parse_mode="Markdown", reply_markup=confirm_kb)
 
-        text_list = []
-        for i, req in enumerate(pending_requests, 1):
-            picker_name = users.get(req['picker_id'], {}).get('username', 'комплектовщик')
-            text_list.append(f"{i}. `{req['position']}` (от {picker_name})")
+@dp.callback_query_handler(lambda c: c.data.startswith("confirm_"))
+async def process_confirm(callback: types.CallbackQuery):
+    _, picker_id, position = callback.data.split("_", 2)
+    picker_id = int(picker_id)
+    pending_requests.append({'picker_id': picker_id, 'position': position})
+    await bot.send_message(picker_id, f"✅ Запрос на пополнение `{position}` добавлен в очередь.", parse_mode="Markdown")
+    await callback.answer()
 
-        full_text = "📬 Активные запросы:\n" + "\n".join(text_list)
-        full_text += "\n\nВыберите номер(а) через запятую (например: 1,3,5):"
+@dp.callback_query_handler(lambda c: c.data == "cancel")
+async def cancel(callback: types.CallbackQuery):
+    await callback.answer("Отменено.")
+    await bot.delete_message(callback.message.chat.id, callback.message.message_id)
 
-        # Кнопки: 1, 2, 3...
-        kb = InlineKeyboardMarkup(row_width=5)
-        buttons = [InlineKeyboardButton(str(i), callback_data=f"take_{i}") for i in range(1, min(len(pending_requests)+1, 11))]
-        kb.add(*buttons)
-        if len(pending_requests) > 1:
-            kb.add(InlineKeyboardButton("Все", callback_data="take_all"))
-        await message.answer(full_text, parse_mode="Markdown", reply_markup=kb)
+# === КЛАДОВЩИК: ПРОСМОТР ЗАПРОСОВ ===
+@dp.message_handler(lambda m: m.text == "🛠 Активные запросы")
+async def show_requests(message: types.Message):
+    uid = message.from_user.id
+    if uid not in users:
+        await message.answer("Напишите /start")
+        return
+    role = users[uid]['role']
+    if role != 'stocker' and role != 'admin':
+        # Делаем пользователя кладовщиком при первом нажатии
+        users[uid]['role'] = 'stocker'
+        await message.answer("✅ Теперь вы — кладовщик.")
+
+    if not pending_requests:
+        await message.answer("📭 Нет активных запросов.")
         return
 
-    # === Обработка выбора через текст (например: "1,2,3") ===
-    if (role == 'stocker' or role == 'admin') and ',' in text:
-        try:
-            indices = [int(x.strip()) for x in text.split(",")]
-            await process_take_by_indices(uid, indices, message)
-        except:
-            await message.answer("Неверный формат. Используйте: 1,2,3")
+    text = "📬 Активные запросы:\n"
+    for i, req in enumerate(pending_requests, 1):
+        picker_name = users.get(req['picker_id'], {}).get('username', 'комплектовщик')
+        text += f"{i}. `{req['position']}` (от {picker_name})\n"
+    text += "\nНажмите на номер запроса, чтобы взять его в работу."
+    await message.answer(text, parse_mode="Markdown")
 
-# === ОБРАБОТКА КНОПОК ===
-@dp.callback_query_handler(lambda c: c.data.startswith("take_"))
-async def process_callback(callback: types.CallbackQuery):
-    stocker_id = callback.from_user.id
-    data = callback.data
-
-    if data == "take_all":
-        indices = list(range(1, len(pending_requests) + 1))
-    else:
-        try:
-            idx = int(data.split("_")[1])
-            indices = [idx]
-        except:
-            await callback.answer("Ошибка", show_alert=True)
-            return
-
-    await process_take_by_indices(stocker_id, indices)
-    await callback.answer("Обработано!")
-
-# === ЛОГИКА ВЗЯТИЯ ЗАПРОСОВ ===
-async def process_take_by_indices(stocker_id, indices, message=None):
-    global pending_requests
-    to_remove = []
-    responses = {}  # position -> set of picker_ids
-
-    for idx in indices:
-        if 1 <= idx <= len(pending_requests):
-            req = pending_requests[idx - 1]
-            pos = req['position']
+@dp.message_handler(lambda m: m.text.isdigit())
+async def take_request_by_id(message: types.Message):
+    uid = message.from_user.id
+    if uid not in users or users[uid]['role'] not in ['stocker', 'admin']:
+        return
+    try:
+        idx = int(message.text) - 1
+        if 0 <= idx < len(pending_requests):
+            req = pending_requests.pop(idx)
             picker_id = req['picker_id']
-
-            if pos not in responses:
-                responses[pos] = set()
-            responses[pos].add(picker_id)
-            to_remove.append(idx - 1)
-
-    if not to_remove:
-        if message:
-            await message.answer("❌ Неверные номера.")
-        return
-
-    # Отправляем уведомления всем комплектовщикам по каждой позиции
-    for pos, picker_ids in responses.items():
-        for pid in picker_ids:
+            position = req['position']
+            picker_name = users.get(picker_id, {}).get('username', 'комплектовщик')
             try:
-                await bot.send_message(pid, f"✅ Позиция `{pos}` пополнена.", parse_mode="Markdown")
+                await bot.send_message(picker_id, f"✅ Позиция `{position}` пополнена.", parse_mode="Markdown")
             except:
                 pass
-
-    # Удаляем обработанные запросы
-    for idx in sorted(to_remove, reverse=True):
-        del pending_requests[idx]
-
-    if message:
-        await message.answer("✅ Запрос(ы) обработан(ы).")
+            await message.answer(f"✅ Вы пополнили запрос от {picker_name}: `{position}`.", parse_mode="Markdown")
+        else:
+            await message.answer("❌ Неверный номер запроса.")
+    except:
+        await message.answer("❌ Неверный формат.")
 
 if __name__ == "__main__":
     print("Бот запущен...")
