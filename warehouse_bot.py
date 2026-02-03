@@ -1,14 +1,17 @@
 import os
 import logging
 from aiogram import Bot, Dispatcher, executor, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
+# === НАСТРОЙКИ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
 
-# Хранилище
-users = {}  # chat_id -> {'role': 'picker'/'stocker', 'username': '@...'}
-pending_requests = {}  # request_id (int) -> { 'picker_id': ..., 'position': ..., 'stocker_id': None or int }
+# Список ID кладовщиков (добавляйте сюда вручную)
+STOCKERS = {
+    1940681422,  # ваш ID — вы тоже кладовщик
+    # 123456789,  # пример: добавьте ID другого кладовщика
+}
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -19,192 +22,116 @@ def get_username(user):
         return "@%s" % user.username
     return "%s" % (user.first_name or "User")
 
-def main_menu(role):
-    kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    if role == 'picker':
-        kb.add("📦 Отправить позицию", "📋 Мои запросы")
-    elif role == 'stocker':
-        kb.add("🛠 Активные запросы")
-    return kb
+# Хранилище запросов: { picker_id: 'position' }
+pending_requests = {}
 
 @dp.message_handler(commands=["start"])
 async def cmd_start(message: types.Message):
     uid = message.from_user.id
     username = get_username(message.from_user)
-    users[uid] = {'role': 'picker', 'username': username}
-    await message.answer(
-        "✅ Вы — комплектовщик.\n\n"
-        "Если вы кладовщик — напишите админу, чтобы он дал вам роль.",
-        reply_markup=main_menu('picker')
-    )
 
-# === КОМПЛЕКТОВЩИК: ОТПРАВКА ПОЗИЦИИ ===
-@dp.message_handler(lambda m: m.text == "📦 Отправить позицию")
-async def ask_position(message: types.Message):
-    await message.answer("Введите код позиции (например, `9540 12`):")
-
-@dp.message_handler(lambda m: m.text not in ["📦 Отправить позицию", "📋 Мои запросы", "🛠 Активные запросы"])
-async def handle_position_input(message: types.Message):
-    uid = message.from_user.id
-    if uid not in users or users[uid]['role'] != 'picker':
-        return
-    position = message.text.strip()
-    if not position:
-        return
-
-    # Генерируем уникальный ID запроса
-    req_id = len(pending_requests) + 1
-    pending_requests[req_id] = {
-        'picker_id': uid,
-        'position': position,
-        'stocker_id': None
-    }
-
-    # Уведомление
-    await message.answer(
-        f"✅ Запрос на пополнение `{position}` добавлен в очередь.\n"
-        f"Как только появится кладовщик — он увидит ваш запрос.",
-        parse_mode="Markdown"
-    )
-
-# === КОМПЛЕКТОВЩИК: МОИ ЗАПРОСЫ ===
-@dp.message_handler(lambda m: m.text == "📋 Мои запросы")
-async def my_requests(message: types.Message):
-    uid = message.from_user.id
-    my_reqs = [
-        (rid, req) for rid, req in pending_requests.items()
-        if req['picker_id'] == uid and req['stocker_id'] is None
-    ]
-    if not my_reqs:
-        await message.answer("📭 У вас нет активных запросов.")
-        return
-
-    text = "📬 Ваши запросы:\n"
-    for rid, req in my_reqs:
-        text += f"{rid}. `{req['position']}`\n"
-    text += "\nОтправьте номер запроса, чтобы отменить его."
-    await message.answer(text, parse_mode="Markdown")
-
-@dp.message_handler(lambda m: m.text.isdigit())
-async def cancel_request_by_id(message: types.Message):
-    uid = message.from_user.id
-    req_id = int(message.text)
-    if req_id not in pending_requests:
-        return
-    req = pending_requests[req_id]
-    if req['picker_id'] != uid:
-        return
-    if req['stocker_id'] is not None:
-        await message.answer("❌ Этот запрос уже взят в работу.")
-        return
-    pending_requests.pop(req_id, None)
-    await message.answer(f"✅ Запрос №{req_id} отменён.")
-
-# === КЛАДОВЩИК: АКТИВНЫЕ ЗАПРОСЫ ===
-@dp.message_handler(lambda m: m.text == "🛠 Активные запросы")
-async def stocker_requests(message: types.Message):
-    uid = message.from_user.id
-    if uid not in users or users[uid]['role'] != 'stocker':
-        # Делаем пользователя кладовщиком при первом нажатии
-        users[uid] = {'role': 'stocker', 'username': get_username(message.from_user)}
-        await message.answer("✅ Теперь вы — кладовщик.", reply_markup=main_menu('stocker'))
-
-    active_reqs = [
-        (rid, req) for rid, req in pending_requests.items() if req['stocker_id'] is None
-    ]
-    if not active_reqs:
-        await message.answer("📭 Нет активных запросов.")
-        return
-
-    text = "📬 Активные запросы:\n"
-    for rid, req in active_reqs:
-        picker_name = users.get(req['picker_id'], {}).get('username', 'комплектовщик')
-        text += f"{rid}. `{req['position']}` (от {picker_name})\n"
-    text += "\nНажмите на номер запроса, чтобы взять его в работу."
-    await message.answer(text, parse_mode="Markdown")
-
-@dp.message_handler(lambda m: m.text.isdigit())
-async def take_request_by_id(message: types.Message):
-    uid = message.from_user.id
-    if uid not in users or users[uid]['role'] != 'stocker':
-        return
-    req_id = int(message.text)
-    if req_id not in pending_requests:
-        return
-    req = pending_requests[req_id]
-    if req['stocker_id'] is not None:
-        await message.answer("❌ Этот запрос уже взят другим кладовщиком.")
-        return
-
-    req['stocker_id'] = uid
-    picker_id = req['picker_id']
-    position = req['position']
-
-    # Уведомляем комплектовщика
-    try:
-        await bot.send_message(
-            picker_id,
-            f"🛠 Кладовщик взял в работу запрос на `{position}`.",
-            parse_mode="Markdown"
+    if uid == ADMIN_CHAT_ID:
+        # Админ — и комплектовщик, и кладовщик
+        kb = ReplyKeyboardMarkup(resize_keyboard=True).add(
+            "📦 Отправить позицию",
+            "🛠 Мои задания"
         )
-    except:
-        pass
+        await message.answer("✅ Вы — админ (комплектовщик + кладовщик).", reply_markup=kb)
+    else:
+        # Все остальные — комплектовщики
+        kb = ReplyKeyboardMarkup(resize_keyboard=True).add("📦 Отправить позицию")
+        await message.answer("✅ Вы — комплектовщик.", reply_markup=kb)
 
-    await message.answer(
-        f"✅ Вы взяли в работу запрос №{req_id} (`{position}`).\n"
-        f"Теперь отправьте:\n/пополнил {position}\n/не_найден {position}\n/в_пути {position}",
-        parse_mode="Markdown"
-    )
-
-# === СТАТУСЫ ОТ КЛАДОВЩИКА ===
 @dp.message_handler(content_types=types.ContentTypes.TEXT)
 async def handle_text(message: types.Message):
     uid = message.from_user.id
     text = message.text.strip()
-    if not text.startswith("/"):
+
+    if text == "📦 Отправить позицию":
+        await message.answer("Введите код позиции (например, `9540 12`):")
         return
 
-    if uid not in users or users[uid]['role'] != 'stocker':
+    if text == "🛠 Мои задания":
+        if uid not in STOCKERS:
+            await message.answer("Вы не кладовщик.")
+            return
+        tasks = []
+        for picker_id, pos in pending_requests.items():
+            picker_name = get_username(await bot.get_chat(picker_id))
+            tasks.append(f"❗ `{pos}` (от {picker_name})")
+        if tasks:
+            await message.answer("Активные запросы:\n" + "\n".join(tasks), parse_mode="Markdown")
+        else:
+            await message.answer("Нет активных запросов.")
         return
 
-    parts = text.split(maxsplit=1)
-    if len(parts) < 2:
-        return
-    cmd, position = parts[0].lower(), parts[1].strip()
-
-    # Найти активный запрос по позиции и кладовщику
-    req_found = None
-    for rid, req in pending_requests.items():
-        if req.get('stocker_id') == uid and req.get('position') == position:
-            req_found = (rid, req)
-            break
-
-    if not req_found:
-        await message.answer("❌ Нет активного задания для этой позиции.")
+    # Комплектовщик отправляет позицию
+    if uid != ADMIN_CHAT_ID and uid not in STOCKERS:
+        # Подтверждение
+        confirm_kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2).add(
+            "✅ Да, запросить", "❌ Нет"
+        )
+        pending_requests[uid] = text  # временно сохраняем
+        await message.answer(f"Запросить пополнение для `{text}`?", parse_mode="Markdown", reply_markup=confirm_kb)
         return
 
-    rid, req = req_found
-    picker_id = req['picker_id']
-    picker_name = users.get(picker_id, {}).get('username', 'комплектовщик')
-
-    if cmd == "/пополнил":
-        msg = f"✅ {picker_name}, позиция `{position}` пополнена."
-    elif cmd == "/не_найден":
-        msg = f"❌ {picker_name}, позиция `{position}` не найдена."
-    elif cmd == "/в_пути":
-        msg = f"🚚 {picker_name}, позиция `{position}` в пути."
-    else:
+    # Обработка подтверждения
+    if text == "✅ Да, запросить":
+        if uid in pending_requests:
+            position = pending_requests[uid]
+            # Рассылаем ВСЕМ кладовщикам
+            for sid in STOCKERS:
+                try:
+                    await bot.send_message(
+                        sid,
+                        f"❗ Запрос на пополнение:\n`{position}`\n(от {get_username(message.from_user)})",
+                        parse_mode="Markdown"
+                    )
+                except:
+                    pass
+            await message.answer("✅ Запрос отправлен кладовщикам.")
+            del pending_requests[uid]
         return
 
-    try:
-        await bot.send_message(picker_id, msg, parse_mode="Markdown")
-    except:
-        pass
+    if text == "❌ Нет":
+        if uid in pending_requests:
+            del pending_requests[uid]
+        await message.answer("Отменено.")
+        return
 
-    pending_requests.pop(rid, None)
-    await message.answer("✅ Статус отправлен.")
+    # Кладовщик отправляет статус: /пополнил 9540 12
+    if uid in STOCKERS and text.startswith("/"):
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer("Укажите позицию, например:\n/пополнил 9540 12")
+            return
+        cmd, position = parts[0].lower(), parts[1].strip()
+        # Находим комплектовщика с таким запросом
+        target_picker = None
+        for pid, pos in pending_requests.items():
+            if pos == position:
+                target_picker = pid
+                break
+        if not target_picker:
+            await message.answer("Нет активного запроса для этой позиции.")
+            return
+
+        # Формируем ответ
+        picker_name = get_username(await bot.get_chat(target_picker))
+        if cmd == "/пополнил":
+            reply = f"✅ {picker_name}, позиция `{position}` пополнена."
+        elif cmd == "/не_найден":
+            reply = f"❌ {picker_name}, позиция `{position}` не найдена."
+        elif cmd == "/в_пути":
+            reply = f"🚚 {picker_name}, позиция `{position}` в пути."
+        else:
+            return
+
+        await bot.send_message(target_picker, reply, parse_mode="Markdown")
+        pending_requests.pop(target_picker, None)
+        await message.answer("✅ Статус отправлен.")
+        return
 
 if __name__ == "__main__":
     print("Бот запущен...")
     executor.start_polling(dp, skip_updates=True)
-
