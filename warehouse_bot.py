@@ -1,15 +1,13 @@
 import os
 import logging
 from aiogram import Bot, Dispatcher, executor, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
 
 # Хранилище
-users = {}  # chat_id -> {'role': 'picker'/'stocker', 'username': '@...'}
+users = {}  # chat_id -> {'role': 'picker'/'stocker'/'admin', 'username': '@...'}
 pending_requests = []  # [{'picker_id': ..., 'position': str}, ...]
-awaiting_position = set()  # chat_id, которые ждут ввод позиции
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -38,97 +36,82 @@ async def cmd_start(message: types.Message):
 
 @dp.message_handler(lambda m: m.text == "📦 Отправить позицию")
 async def ask_position(message: types.Message):
-    uid = message.from_user.id
-    role = users.get(uid, {}).get('role')
-    if role in ['picker', 'admin']:
-        awaiting_position.add(uid)
-        await message.answer("Введите код позиции (например, `9540 1/2`):")
-    else:
-        await message.answer("Вы не можете отправлять запросы.")
+    await message.answer("Введите код позиции (например, `9540 1/2`):")
 
-@dp.message_handler(content_types=types.ContentTypes.TEXT)
-async def handle_text(message: types.Message):
+@dp.message_handler(lambda m: m.text not in ["📦 Отправить позицию", "🛠 Активные запросы"])
+async def handle_position_input(message: types.Message):
     uid = message.from_user.id
-    text = message.text.strip()
+    if uid not in users or users[uid]['role'] not in ['picker', 'admin']:
+        return
+    position = message.text.strip()
+    if not position:
+        return
+    pending_requests.append({'picker_id': uid, 'position': position})
+    await message.answer(f"✅ Запрос на пополнение `{position}` добавлен в очередь.", parse_mode="Markdown")
 
+@dp.message_handler(lambda m: m.text == "🛠 Активные запросы")
+async def show_requests(message: types.Message):
+    uid = message.from_user.id
     if uid not in users:
         await message.answer("Напишите /start")
         return
-
     role = users[uid]['role']
+    if role not in ['stocker', 'admin']:
+        # Становимся кладовщиком при первом нажатии
+        users[uid]['role'] = 'stocker'
+        await message.answer("✅ Теперь вы — кладовщик.")
 
-    # Обработка ввода позиции
-    if uid in awaiting_position:
-        awaiting_position.discard(uid)
-        if text and role in ['picker', 'admin']:
-            # Подтверждение
-            confirm_kb = InlineKeyboardMarkup().add(
-                InlineKeyboardButton("✅ Да", callback_data=f"confirm_{uid}_{text}"),
-                InlineKeyboardButton("❌ Нет", callback_data="cancel")
-            )
-            await message.answer(f"Запросить пополнение для `{text}`?", parse_mode="Markdown", reply_markup=confirm_kb)
+    if not pending_requests:
+        await message.answer("📭 Нет активных запросов.")
         return
 
-    # Кладовщик: просмотр запросов
-    if text == "🛠 Активные запросы":
-        if role not in ['stocker', 'admin']:
-            # Делаем пользователя кладовщиком при первом нажатии
-            users[uid]['role'] = 'stocker'
-            await message.answer("✅ Теперь вы — кладовщик.")
-            role = 'stocker'
+    text = "📬 Активные запросы:\n"
+    for i, req in enumerate(pending_requests, 1):
+        picker_name = users.get(req['picker_id'], {}).get('username', 'комплектовщик')
+        text += f"{i}. `{req['position']}` (от {picker_name})\n"
+    text += "\nПосле пополнения отправьте:\n`/готово [позиция]`"
+    await message.answer(text, parse_mode="Markdown")
 
-        if not pending_requests:
-            await message.answer("📭 Нет активных запросов.")
-            return
-
-        text_list = []
-        for i, req in enumerate(pending_requests, 1):
-            picker_name = users.get(req['picker_id'], {}).get('username', 'комплектовщик')
-            text_list.append(f"{i}. `{req['position']}` (от {picker_name})")
-
-        full_text = "📬 Активные запросы:\n" + "\n".join(text_list)
-        full_text += "\n\nВведите номер запроса, чтобы взять его в работу."
-        await message.answer(full_text, parse_mode="Markdown")
+# === КОМАНДА /ГОТОВО ===
+@dp.message_handler(lambda m: m.text.startswith("/готово"))
+async def cmd_ready(message: types.Message):
+    uid = message.from_user.id
+    if uid not in users or users[uid]['role'] not in ['stocker', 'admin']:
+        await message.answer("Только кладовщики могут использовать `/готово`.")
         return
 
-    # Обработка выбора номера запроса
-    if role in ['stocker', 'admin'] and text.isdigit():
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Укажите позицию, например:\n`/готово 9540 1/2`", parse_mode="Markdown")
+        return
+
+    position = parts[1].strip()
+    # Находим всех комплектовщиков, запросивших эту позицию
+    target_pickers = []
+    remaining_requests = []
+
+    for req in pending_requests:
+        if req['position'] == position:
+            target_pickers.append(req['picker_id'])
+        else:
+            remaining_requests.append(req)
+
+    if not target_pickers:
+        await message.answer(f"❌ Нет активных запросов для позиции `{position}`.", parse_mode="Markdown")
+        return
+
+    # Удаляем обработанные запросы
+    pending_requests.clear()
+    pending_requests.extend(remaining_requests)
+
+    # Уведомляем всех комплектовщиков
+    for pid in set(target_pickers):  # set() — на случай дублей
         try:
-            idx = int(text) - 1
-            if 0 <= idx < len(pending_requests):
-                req = pending_requests.pop(idx)
-                picker_id = req['picker_id']
-                position = req['position']
-                picker_name = users.get(picker_id, {}).get('username', 'комплектовщик')
-                try:
-                    await bot.send_message(picker_id, f"✅ Позиция `{position}` пополнена.", parse_mode="Markdown")
-                except:
-                    pass
-                await message.answer(f"✅ Вы пополнили запрос от {picker_name}: `{position}`.", parse_mode="Markdown")
-            else:
-                await message.answer("❌ Неверный номер запроса.")
-        except Exception as e:
-            await message.answer("❌ Ошибка при обработке запроса.")
-        return
+            await bot.send_message(pid, f"✅ Позиция `{position}` пополнена. Можете взять.", parse_mode="Markdown")
+        except:
+            pass
 
-    # Если ничего не подошло
-    if role in ['picker', 'admin']:
-        await message.answer("Нажмите «📦 Отправить позицию», чтобы отправить запрос.")
-    else:
-        await message.answer("Используйте «🛠 Активные запросы» для просмотра очереди.")
-
-@dp.callback_query_handler(lambda c: c.data.startswith("confirm_"))
-async def process_confirm(callback: types.CallbackQuery):
-    _, picker_id, position = callback.data.split("_", 2)
-    picker_id = int(picker_id)
-    pending_requests.append({'picker_id': picker_id, 'position': position})
-    await bot.send_message(picker_id, f"✅ Запрос на пополнение `{position}` добавлен в очередь.", parse_mode="Markdown")
-    await callback.answer()
-
-@dp.callback_query_handler(lambda c: c.data == "cancel")
-async def cancel(callback: types.CallbackQuery):
-    await callback.answer("Отменено.")
-    await bot.delete_message(callback.message.chat.id, callback.message.message_id)
+    await message.answer(f"✅ Позиция `{position}` помечена как пополненная.", parse_mode="Markdown")
 
 if __name__ == "__main__":
     print("Бот запущен...")
