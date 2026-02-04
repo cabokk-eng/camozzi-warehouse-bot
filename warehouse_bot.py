@@ -1,5 +1,6 @@
-import uuid
 import os
+import logging  # ← ЭТА СТРОКА ОБЯЗАТЕЛЬНА
+import uuid
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -94,3 +95,4 @@ async def take_request(callback: types.CallbackQuery):
 if __name__ == "__main__":
     print("Бот запущен...")
     executor.start_polling(dp, skip_updates=True)
+
