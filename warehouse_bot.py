@@ -1,16 +1,20 @@
 import os
 import logging
 import uuid
-from aiogram import Bot, Dispatcher, executor, types
+from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiohttp import web
 
 # === НАСТРОЙКИ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
+WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://your-service.onrender.com")
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
 # Хранилище
-users = {}  # chat_id -> {'role': 'picker'/'stocker'/'admin', 'username': '@...'}
-pending_requests = {}  # {req_id: {'picker_id': ..., 'position': ..., 'completed': False}}
+users = {}
+pending_requests = {}
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -52,8 +56,7 @@ async def handle_text(message: types.Message):
 
     role = users[uid]['role']
 
-    # Комплектовщик или админ отправляет позицию
-    if text != "📦 Отправить позицию" and text != "🛠 Активные запросы":
+    if text not in ["📦 Отправить позицию", "🛠 Активные запросы"]:
         if role in ['picker', 'admin']:
             if text:
                 req_id = str(uuid.uuid4())
@@ -65,10 +68,8 @@ async def handle_text(message: types.Message):
                 await message.answer(f"✅ Запрос на пополнение `{text}` добавлен в очередь.", parse_mode="Markdown")
         return
 
-    # Кладовщик или админ просматривает запросы
     if text == "🛠 Активные запросы":
         if role not in ['stocker', 'admin']:
-            # Становимся кладовщиком
             users[uid]['role'] = 'stocker'
             role = 'stocker'
 
@@ -77,7 +78,6 @@ async def handle_text(message: types.Message):
             await message.answer("📭 Нет активных запросов.")
             return
 
-        # Формируем короткий список
         lines = []
         for i, (rid, req) in enumerate(active, 1):
             picker_name = users.get(req['picker_id'], {}).get('username', 'комплектовщик')
@@ -91,7 +91,6 @@ async def handle_text(message: types.Message):
         ]
         kb.add(*buttons)
 
-        # Отправляем коротко, чтобы кнопки были видны
         if len(active) <= 6:
             await message.answer(text_list + "\n\n", reply_markup=kb)
         else:
@@ -115,18 +114,31 @@ async def take_request(callback: types.CallbackQuery):
     picker_id = req['picker_id']
 
     try:
-        await bot.send_message(
-            picker_id,
-            f"✅ Позиция `{position}` пополнена.",
-            parse_mode="Markdown"
-        )
+        await bot.send_message(picker_id, f"✅ Позиция `{position}` пополнена.", parse_mode="Markdown")
     except:
         pass
 
     await callback.answer("✅ Выполнено!")
     await bot.send_message(callback.from_user.id, f"✅ Вы пополнили: `{position}`", parse_mode="Markdown")
 
-if __name__ == "__main__":
-    print("Бот запущен...")
-    executor.start_polling(dp, skip_updates=True)
+# === ВЕБХУК ===
+async def on_startup(app):
+    await bot.set_webhook(WEBHOOK_URL)
+    logging.info(f"Webhook set to {WEBHOOK_URL}")
 
+async def on_shutdown(app):
+    await bot.delete_webhook()
+    logging.info("Webhook deleted")
+
+async def webhook_handler(request):
+    update = types.Update(**await request.json())
+    await dp.process_update(update)
+    return web.Response()
+
+app = web.Application()
+app.on_startup.append(on_startup)
+app.on_shutdown.append(on_shutdown)
+app.router.add_post(WEBHOOK_PATH, webhook_handler)
+
+if __name__ == "__main__":
+    web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
