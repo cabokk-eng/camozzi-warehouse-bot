@@ -54,17 +54,28 @@ async def show_requests(message: types.Message):
         await message.answer("📭 Нет активных запросов.")
         return
 
-    text = "📬 Активные запросы:\n"
-    kb = InlineKeyboardMarkup(row_width=5)
-    buttons = []
-
+    text = "Запросы:\n"
     for i, (req_id, req) in enumerate(active, 1):
         picker_name = users.get(req['picker_id'], {}).get('username', 'комплектовщик')
-        text += f"{i}. `{req['position']}` (от {picker_name})\n"
-        buttons.append(InlineKeyboardButton(str(i), callback_data=f"take_{req_id}"))
+        text += f"{i}. {req['position']} ({picker_name})\n"
 
+    kb = InlineKeyboardMarkup(row_width=5)
+    buttons = [
+        InlineKeyboardButton(str(i), callback_data=f"take_{req_id}")
+        for i, (req_id, _) in enumerate(active, 1)
+    ]
     kb.add(*buttons)
-    await message.answer(text, parse_mode="Markdown", reply_markup=kb)
+
+    # Отправляем коротко
+    if len(active) <= 6:
+        await message.answer(text + "\n\n", reply_markup=kb)
+    else:
+        await message.answer("📬 Активные запросы:")
+        await message.answer("\n".join([
+            f"{i}. {req['position']} ({users[req['picker_id']]['username']})"
+            for i, (_, req) in enumerate(active, 1)
+        ]), reply_markup=kb)
+
 
 @dp.callback_query_handler(lambda c: c.data.startswith("take_"))
 async def take_request(callback: types.CallbackQuery):
@@ -96,5 +107,6 @@ async def take_request(callback: types.CallbackQuery):
 if __name__ == "__main__":
     print("Бот запущен...")
     executor.start_polling(dp, skip_updates=True)
+
 
 
