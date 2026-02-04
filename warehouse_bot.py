@@ -92,7 +92,9 @@ async def take_request(callback: types.CallbackQuery):
 
     await callback.answer("✅ Выполнено!")
 
+# ✅ ТОЛЬКО ТАК:
 if __name__ == "__main__":
     print("Бот запущен...")
     executor.start_polling(dp, skip_updates=True)
+
 
